@@ -4,6 +4,7 @@ const app = express();
 const cors = require('cors');
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 require('dotenv').config();
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const port = process.env.PORT || 5000;
 
 /* middleware*/
@@ -34,8 +35,8 @@ async function run() {
     const menuCollection = client.db("bistroDb").collection("menu");
     const reviewCollection = client.db("bistroDb").collection("reviews");
     const cartCollection = client.db("bistroDb").collection("carts");
-
-
+    const paymentCollection = client.db("bistroDb").collection("payments");
+    const bookingCollections = client.db("bistroDb").collection("bookings");
 
     //    app.get('/menu',async(req,res)=>{
     //     // const result = await menuCollection.find().toArray();
@@ -239,6 +240,130 @@ async function run() {
       const result = await cartCollection.deleteOne(query);
       res.send(result)
     })
+
+    // AdminHome
+    app.get('/admin-stats', verifyToken, verifyAdmin, async (req, res) => {
+      const users = await userCollection.estimatedDocumentCount();
+      const menuItems = await menuCollection.estimatedDocumentCount();
+
+      res.send({
+        users,
+        menuItems,
+      });
+    });
+
+
+    // payment intent
+    app.get('/payments/:email', verifyToken, async (req, res) => {
+      const query = { email: req.params.email }
+      if (req.params.email !== req.decoded.email) {
+        return res.status(403).send({ message: 'forbidden access' });
+      }
+      const result = await paymentCollection.find(query).toArray();
+      res.send(result);
+    })
+
+
+    app.post('/create-payment-intent', async (req, res) => {
+      const { price } = req.body;
+      const amount = parseInt(price * 100);
+      console.log(amount, 'amount inside the intent')
+
+      const paymentIntent = await stripe.paymentIntents.create({
+        amount: amount,
+        currency: 'usd',
+        payment_method_types: ['card']
+      });
+
+      res.send({
+        clientSecret: paymentIntent.client_secret
+      })
+    });
+    app.post('/payments', async (req, res) => {
+      const payment = req.body;
+      const paymentResult = await paymentCollection.insertOne(payment);
+
+      //  carefully delete each item from the cart
+      console.log('payment info', payment);
+      const query = {
+        _id: {
+          $in: payment.cartIds.map(id => new ObjectId(id))
+        }
+      };
+
+      const deleteResult = await cartCollection.deleteMany(query);
+
+      res.send({ paymentResult, deleteResult });
+    })
+
+
+
+    // Bookings Related APi
+    function generateSlots() {
+      return ['14:00', '15:00', '16:00', '17:00', '18:00', '19:00', '20:00', '21:00'];
+    }
+
+    // Get available slots
+    app.get('/api/slots', async (req, res) => {
+      const { date } = req.query;
+      if (!date) return res.status(400).json({ error: 'Date required' });
+
+      const maxPerSlot = 50; // max people per slot
+      const times = ['12:00','13:00','14:00','15:00','16:00','17:00', '18:00', '19:00', '20:00', '21:00'];
+
+      // Count existing bookings per slot
+      const bookings = await bookingCollections
+        .aggregate([
+          { $match: { date } },
+          { $group: { _id: '$time', count: { $sum: '$guests' } } }
+        ])
+        .toArray();
+
+      const bookingsMap = {};
+      bookings.forEach(b => {
+        bookingsMap[b._id] = b.count;
+      });
+
+      const slots = times.map(time => {
+        const booked = bookingsMap[time] || 0;
+        return {
+          time,
+          available: booked < maxPerSlot,
+          remaining: maxPerSlot - booked
+        };
+      });
+
+      res.json(slots);
+    });
+
+    // Book a table
+    app.post('/api/book', async (req, res) => {
+      const { date, time, name, guests } = req.body;
+      if (!date || !time || !name || !guests) {
+        return res.status(400).json({ error: 'All fields required' });
+      }
+
+      const maxPerSlot = 50;
+
+      // Count current total for this slot
+      const existing = await bookingCollections.aggregate([
+        { $match: { date, time } },
+        { $group: { _id: '$time', count: { $sum: '$guests' } } }
+      ]).toArray();
+
+      const currentCount = existing[0]?.count || 0;
+
+      if (currentCount + guests > maxPerSlot) {
+        return res.status(409).json({ error: 'Slot full, not enough space' });
+      }
+
+      const booking = { date, time, name, guests };
+      const result = await bookingCollections.insertOne(booking);
+      res.json({ success: true, id: result.insertedId });
+    });
+
+
+
 
 
 
