@@ -3,6 +3,7 @@ const jwt = require('jsonwebtoken');
 const app = express();
 const cors = require('cors');
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
+const nodemailer = require('nodemailer');
 require('dotenv').config();
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const port = process.env.PORT || 5000;
@@ -37,7 +38,7 @@ async function run() {
     const cartCollection = client.db("bistroDb").collection("carts");
     const paymentCollection = client.db("bistroDb").collection("payments");
     const bookingCollections = client.db("bistroDb").collection("bookings");
-
+    const messagesCollection = client.db("bistroDb").collection("messages");
     //    app.get('/menu',async(req,res)=>{
     //     // const result = await menuCollection.find().toArray();
     //     // res.send(result);
@@ -303,13 +304,18 @@ async function run() {
       return ['14:00', '15:00', '16:00', '17:00', '18:00', '19:00', '20:00', '21:00'];
     }
 
+    app.get('/managebooking', verifyToken, verifyAdmin, async (req, res) => {
+      const bookings = await bookingCollections.find({}).toArray();
+      res.send(bookings);
+    });
+
     // Get available slots
     app.get('/api/slots', async (req, res) => {
       const { date } = req.query;
       if (!date) return res.status(400).json({ error: 'Date required' });
 
       const maxPerSlot = 50; // max people per slot
-      const times = ['12:00','13:00','14:00','15:00','16:00','17:00', '18:00', '19:00', '20:00', '21:00'];
+      const times = ['12:00', '13:00', '14:00', '15:00', '16:00', '17:00', '18:00', '19:00', '20:00', '21:00'];
 
       // Count existing bookings per slot
       const bookings = await bookingCollections
@@ -338,8 +344,8 @@ async function run() {
 
     // Book a table
     app.post('/api/book', async (req, res) => {
-      const { date, time, name, guests } = req.body;
-      if (!date || !time || !name || !guests) {
+      const { date, time, name, guests, email } = req.body;
+      if (!date || !time || !name || !guests || !email) {
         return res.status(400).json({ error: 'All fields required' });
       }
 
@@ -357,10 +363,149 @@ async function run() {
         return res.status(409).json({ error: 'Slot full, not enough space' });
       }
 
-      const booking = { date, time, name, guests };
+      const booking = { date, time, name, email, guests };
       const result = await bookingCollections.insertOne(booking);
-      res.json({ success: true, id: result.insertedId });
+      res.send({ success: true, id: result.insertedId });
     });
+
+    app.delete('/managebooking/:id', verifyToken, verifyAdmin, async (req, res) => {
+      const { id } = req.params;
+      const result = await bookingCollections.deleteOne({ _id: new ObjectId(id) });
+      if (result.deletedCount === 1) {
+        res.send({ success: true });
+      } else {
+        res.status(404).json({ error: 'Booking not found' });
+      }
+    });
+
+
+    // PUT /api/bookings/:id
+    app.put('/managebooking/:id', verifyToken, verifyAdmin, async (req, res) => {
+      const { id } = req.params;
+      const { name, guests, date, time } = req.body;
+
+      const result = await bookingCollections.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { name, guests, date, time } }
+      );
+
+      if (result.matchedCount === 1) {
+        res.send({ success: true });
+      } else {
+        res.status(404).json({ error: 'Booking not found' });
+      }
+    });
+
+    // MyBooking related api
+
+
+    app.get('/my-bookings', verifyToken, async (req, res) => {
+      const email = req.query.email;
+      if (req.decoded.email !== email) {
+        return res.status(403).send({ message: 'forbidden access' });
+      }
+      const bookings = await bookingCollections.find({ email }).toArray();
+      res.send(bookings);
+    });
+
+    app.delete('/my-bookings/:id', verifyToken, async (req, res) => {
+      const id = req.params.id;
+      const email = req.decoded.email; // ✅ use decoded from token
+
+      const result = await bookingCollections.deleteOne({
+        _id: new ObjectId(id),
+        email: email, // only owner can delete
+      });
+
+      if (result.deletedCount) {
+        return res.send({ success: true });
+      } else {
+        return res.status(404).json({ error: 'Booking not found' });
+      }
+    });
+
+    app.put('/my-bookings/:id', verifyToken, async (req, res) => {
+      const { id } = req.params;
+      const update = req.body; // { guests, date, time, etc. }
+
+      const result = await bookingCollections.updateOne(
+        { _id: new ObjectId(id), email: req.decoded.email }, // ✅ use decoded.email
+        { $set: update }
+      );
+
+      if (result.matchedCount) {
+        res.send({ success: true });
+      } else {
+        res.status(404).json({ error: 'Booking not found' });
+      }
+    });
+
+
+    // Message related api
+    app.post("/api/messages", async (req, res) => {
+      const { name, email, phone, message, token } = req.body;
+
+      // Verify reCAPTCHA
+      const verify = await fetch(
+        `https://www.google.com/recaptcha/api/siteverify?secret=${process.env.RECAPTCHA_SECRET_KEY}&response=${token}`,
+        { method: "POST" }
+      ).then(r => r.json());
+
+      if (!verify.success) return res.status(400).json({ error: "Invalid captcha" });
+
+      const doc = { name, email, phone, message, createdAt: new Date() };
+      const result = await messagesCollection.insertOne(doc);
+      res.json({ insertedId: result.insertedId });
+    });
+
+    // / 2️⃣ Fetch all messages (admin dashboard)
+    app.get("/api/messages", async (req, res) => {
+      const messages = await messagesCollection.find().sort({ createdAt: -1 }).toArray();
+      res.json(messages);
+    });
+
+
+    app.post("/api/messages/reply", async (req, res) => {
+  const { messageId, reply } = req.body;
+
+  if (!messageId || !reply) return res.status(400).json({ error: "Message ID and reply are required" });
+
+  // 1. Save reply in MongoDB
+  const result = await messagesCollection.updateOne(
+    { _id: new ObjectId(messageId) },
+    { $set: { reply, repliedAt: new Date() } }
+  );
+
+  // 2. Optional: Send email using nodemailer
+  const originalMessage = await messagesCollection.findOne({ _id: new ObjectId(messageId) });
+  if (!originalMessage) return res.status(404).json({ error: "Message not found" });
+
+  try {
+    const transporter = nodemailer.createTransport({
+      service: "Gmail",
+      auth: {
+        user: process.env.EMAIL_USER, // your email
+        pass: process.env.EMAIL_PASS, // your email app password
+      },
+    });
+
+    await transporter.sendMail({
+      from: process.env.EMAIL_USER,
+      to: originalMessage.email,
+      subject: "Reply from Bistro Boss",
+      text: reply,
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to send email" });
+  }
+});
+
+
+
+
 
 
 
