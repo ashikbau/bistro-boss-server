@@ -1,9 +1,13 @@
+
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const app = express();
 const cors = require('cors');
+const helmet = require('helmet');
+
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const nodemailer = require('nodemailer');
+const twilio = require('twilio');
 require('dotenv').config();
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const port = process.env.PORT || 5000;
@@ -11,12 +15,38 @@ const port = process.env.PORT || 5000;
 /* middleware*/
 app.use(cors());
 app.use(express.json());
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      connectSrc: ["'self'", "http://localhost:5000"],
+      scriptSrc: ["'self'", "'unsafe-inline'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", "data:"],
+    },
+  },
+}));
+
+// Nodemailer setup
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS,
+  },
+});
+
+// Twilio setup
+const twilioClient = twilio(process.env.TWILIO_SID, process.env.TWILIO_AUTH_TOKEN);
+const twilioFrom = process.env.TWILIO_PHONE;
+
+
 
 /* Mongodb*/
 
 
 
-const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.jmgafd7.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0";`;
+const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.jmgafd7.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0";`
 
 // Create a MongoClient with a MongoClientOptions object to set the Stable API version
 const client = new MongoClient(uri, {
@@ -39,16 +69,7 @@ async function run() {
     const paymentCollection = client.db("bistroDb").collection("payments");
     const bookingCollections = client.db("bistroDb").collection("bookings");
     const messagesCollection = client.db("bistroDb").collection("messages");
-    //    app.get('/menu',async(req,res)=>{
-    //     // const result = await menuCollection.find().toArray();
-    //     // res.send(result);
-    //     const page = parseInt(req.query.page) || 1;
-    //   const limit = parseInt(req.query.limit) || 6;
-    //   const skip = (page - 1) * limit;
 
-    //   const result = await menuCollection.find().skip(skip).limit(limit).toArray();
-    //   res.json({ result});
-    //    })
 
     // jwt related api
     app.post('/jwt', async (req, res) => {
@@ -59,7 +80,7 @@ async function run() {
 
     // midleware api
     const verifyToken = (req, res, next) => {
-      console.log("inside verify token", req.headers.authorization)
+
       if (!req.headers.authorization) {
         return res.status(401).send({ message: "Forbidden Access" })
       }
@@ -168,31 +189,46 @@ async function run() {
     });
 
     app.get('/menu', async (req, res) => {
-      const page = parseInt(req.query.page);
-      const limit = parseInt(req.query.limit);
-      const category = req.query.category;
+      try {
+        const page = parseInt(req.query.page);
+        const limit = parseInt(req.query.limit);
+        const category = req.query.category;
+        const isFeatured = req.query.featured;
 
-      const query = category ? { category } : {};
+        const query = {};
 
-      if (!isNaN(page) && !isNaN(limit)) {
-        const skip = (page - 1) * limit;
+        if (category) {
+          query.category = category;
+        }
 
-        // Correct: use countDocuments to apply filters
-        const total = await menuCollection.countDocuments(query);
+        if (isFeatured === 'true') {
+          query.featured = true; // Make sure it's stored as a boolean in MongoDB
+        }
 
-        // Correct: use query inside find()
-        const items = await menuCollection.find(query).skip(skip).limit(limit).toArray();
+        // If pagination is requested
+        if (!isNaN(page) && !isNaN(limit)) {
+          const skip = (page - 1) * limit;
 
-        return res.json({
-          total,
-          items,
-        });
+          const total = await menuCollection.countDocuments(query);
+          const items = await menuCollection.find(query).skip(skip).limit(limit).toArray();
+
+          return res.json({
+            total,
+            items,
+          });
+        }
+
+        // Otherwise return all matching items
+        const allItems = await menuCollection.find(query).toArray();
+        res.json(allItems);
+
+      } catch (error) {
+        console.error("Error fetching menu:", error);
+        res.status(500).json({ error: 'Internal server error' });
       }
-
-      // No pagination: return all (filtered or unfiltered) items
-      const allItems = await menuCollection.find(query).toArray();
-      res.json(allItems);
     });
+
+
 
     app.patch('/menu/:id', async (req, res) => {
       const item = req.body;
@@ -218,11 +254,67 @@ async function run() {
       res.send(result);
     })
 
+    // review related API start
+
 
     app.get('/reviews', async (req, res) => {
       const result = await reviewCollection.find().toArray();
       res.send(result);
     })
+
+
+    // Add a review
+    app.post("/addReview", verifyToken, async (req, res) => {
+      const { name, rating, details } = req.body;
+      const userEmail = req.decoded?.email;
+
+      if (!name || !rating || !details || !userEmail) {
+        return res.status(400).json({ error: "Missing fields" });
+      }
+
+      const newReview = {
+        name,
+        rating,
+        details,
+        userEmail, // ✅ email from token, not body
+        createdAt: new Date(),
+      };
+
+      const result = await reviewCollection.insertOne(newReview);
+      res.status(201).json({ insertedId: result.insertedId });
+    });
+
+
+    app.get("/myReviews", verifyToken, async (req, res) => {
+      const { email } = req.query;          // frontend passes ?email=user@example.com
+      const reviews = await reviewCollection.find({ userEmail: email }).toArray();
+      res.json(reviews);
+    });
+
+    app.put("/myReviews/:id", verifyToken, async (req, res) => {
+      const { id } = req.params;
+      const { rating, details } = req.body;
+
+      const result = await reviewCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { rating, details } }
+      );
+      res.json(result);
+    });
+
+    app.delete("/myReviews/:id", verifyToken, async (req, res) => {
+      const { id } = req.params;
+      const result = await reviewCollection.deleteOne({ _id: new ObjectId(id) });
+      res.json(result);
+    });
+
+
+
+
+
+
+    // review related API end
+
     app.get('/carts', async (req, res) => {
       const email = req.query.email;
       const query = { email: email }
@@ -280,22 +372,54 @@ async function run() {
         clientSecret: paymentIntent.client_secret
       })
     });
+
+    // delete all cart items and send notification
     app.post('/payments', async (req, res) => {
       const payment = req.body;
       const paymentResult = await paymentCollection.insertOne(payment);
 
-      //  carefully delete each item from the cart
-      console.log('payment info', payment);
+      // Delete purchased items from cart
       const query = {
         _id: {
           $in: payment.cartIds.map(id => new ObjectId(id))
         }
       };
-
       const deleteResult = await cartCollection.deleteMany(query);
 
-      res.send({ paymentResult, deleteResult });
-    })
+      // ✅ Send notifications
+      try {
+        const name = payment.name || "Customer";
+        const email = payment.email;
+        const phone = payment.phone;
+        const amount = payment.price;
+
+        // ✅ Email Notification
+        await transporter.sendMail({
+          from: process.env.EMAIL_USER,
+          to: email,
+          subject: "Payment Confirmation - Bistro Boss",
+          text: `Hi ${name},\n\nThank you for your payment of $${amount}.\n\nWe’ve received it successfully. Your order is now being processed.\n\nBest regards,\nBistro Boss Team`
+        });
+
+        // ✅ SMS Notification
+        await twilioClient.messages.create({
+          body: `Hi ${name}, your payment of $${amount} was successful. Thanks for choosing Bistro Boss!`,
+          from: process.env.TWILIO_PHONE,
+          to: phone
+        });
+
+        res.send({ paymentResult, deleteResult, success: true });
+
+      } catch (error) {
+        console.error("Notification error after payment:", error);
+        res.status(500).send({
+          message: "Payment processed but notification failed.",
+          paymentResult,
+          deleteResult
+        });
+      }
+    });
+
 
 
 
@@ -342,41 +466,107 @@ async function run() {
       res.json(slots);
     });
 
-    // Book a table
+    // Book a table send email and sms notification
+
     app.post('/api/book', async (req, res) => {
-      const { date, time, name, guests, email } = req.body;
-      if (!date || !time || !name || !guests || !email) {
+      const { date, time, name, phone, guests, email } = req.body;
+
+      if (!date || !time || !name || !guests || !email || !phone) {
         return res.status(400).json({ error: 'All fields required' });
       }
 
+      const guestsCount = parseInt(guests);
       const maxPerSlot = 50;
 
-      // Count current total for this slot
-      const existing = await bookingCollections.aggregate([
-        { $match: { date, time } },
-        { $group: { _id: '$time', count: { $sum: '$guests' } } }
-      ]).toArray();
+      try {
+        // Check current guest count for the slot
+        const existing = await bookingCollections.aggregate([
+          { $match: { date, time } },
+          { $group: { _id: '$time', count: { $sum: '$guests' } } }
+        ]).toArray();
 
-      const currentCount = existing[0]?.count || 0;
+        const currentCount = existing[0]?.count || 0;
 
-      if (currentCount + guests > maxPerSlot) {
-        return res.status(409).json({ error: 'Slot full, not enough space' });
+        if (currentCount + guestsCount > maxPerSlot) {
+          return res.status(409).json({ error: 'Slot full, not enough space' });
+        }
+
+        // Save booking
+        const booking = { date, time, name, email, phone, guests: guestsCount };
+        const result = await bookingCollections.insertOne(booking);
+
+        // Send email
+        await transporter.sendMail({
+          from: process.env.EMAIL_USER,
+          to: email,
+          subject: 'Booking Confirmation',
+          text: `Hi ${name}, your booking is confirmed for ${date} at ${time}. Guests: ${guestsCount}`
+        });
+
+        // Send SMS
+        await twilioClient.messages.create({
+          body: `Hi ${name}, your booking is confirmed for ${date} at ${time}. Guests: ${guestsCount}`,
+          from: process.env.TWILIO_PHONE,
+          to: phone
+        });
+
+        res.send({ success: true, id: result.insertedId });
+      } catch (error) {
+        console.error('Booking error:', error);
+        res.status(500).json({ error: 'Booking saved, but notification failed.' });
       }
-
-      const booking = { date, time, name, email, guests };
-      const result = await bookingCollections.insertOne(booking);
-      res.send({ success: true, id: result.insertedId });
     });
+
 
     app.delete('/managebooking/:id', verifyToken, verifyAdmin, async (req, res) => {
       const { id } = req.params;
-      const result = await bookingCollections.deleteOne({ _id: new ObjectId(id) });
-      if (result.deletedCount === 1) {
-        res.send({ success: true });
-      } else {
-        res.status(404).json({ error: 'Booking not found' });
+
+      try {
+        // 1. Find the booking first
+        const booking = await bookingCollections.findOne({ _id: new ObjectId(id) });
+
+        if (!booking) {
+          return res.status(404).json({ error: 'Booking not found' });
+        }
+
+        // 2. Delete the booking
+        const result = await bookingCollections.deleteOne({ _id: new ObjectId(id) });
+
+        if (result.deletedCount !== 1) {
+          return res.status(500).json({ error: 'Failed to delete booking' });
+        }
+
+        // 3. Send notifications (Email + SMS)
+        try {
+          // ✅ Email notification
+          await transporter.sendMail({
+            from: process.env.EMAIL_USER,
+            to: booking.email,
+            subject: 'Booking Canceled by Admin',
+            text: `Hi ${booking.name},\n\nYour booking on ${booking.date} at ${booking.time} has been canceled by the administrator.\n\nIf you have any questions, please contact support.`,
+          });
+
+          // ✅ SMS notification
+          await twilioClient.messages.create({
+            body: `Hi ${booking.name}, your booking on ${booking.date} at ${booking.time} was canceled by the admin.`,
+            from: process.env.TWILIO_PHONE,
+            to: booking.phone,
+          });
+
+          // Respond success
+          res.send({ success: true });
+
+        } catch (notifyErr) {
+          console.error('Notification error:', notifyErr);
+          res.send({ success: true, note: 'Booking deleted but notifications failed.' });
+        }
+
+      } catch (err) {
+        console.error('Delete error:', err);
+        res.status(500).json({ error: 'Server error' });
       }
     });
+
 
 
     // PUT /api/bookings/:id
@@ -384,17 +574,54 @@ async function run() {
       const { id } = req.params;
       const { name, guests, date, time } = req.body;
 
-      const result = await bookingCollections.updateOne(
-        { _id: new ObjectId(id) },
-        { $set: { name, guests, date, time } }
-      );
+      try {
+        // 1. Find existing booking
+        const existingBooking = await bookingCollections.findOne({ _id: new ObjectId(id) });
 
-      if (result.matchedCount === 1) {
-        res.send({ success: true });
-      } else {
-        res.status(404).json({ error: 'Booking not found' });
+        if (!existingBooking) {
+          return res.status(404).json({ error: 'Booking not found' });
+        }
+
+        // 2. Update booking
+        const result = await bookingCollections.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { name, guests, date, time } }
+        );
+
+        if (result.matchedCount !== 1) {
+          return res.status(500).json({ error: 'Failed to update booking' });
+        }
+
+        // 3. Send notifications (email + SMS)
+        try {
+          // ✅ Email notification
+          await transporter.sendMail({
+            from: process.env.EMAIL_USER,
+            to: existingBooking.email,
+            subject: 'Booking Updated by Admin',
+            text: `Hi ${name},\n\nYour booking has been updated to:\nDate: ${date}\nTime: ${time}\nGuests: ${guests}\n\nIf this wasn't you, please contact support.`,
+          });
+
+          // ✅ SMS notification
+          await twilioClient.messages.create({
+            body: `Hi ${name}, your booking has been updated to ${date} at ${time} for ${guests} guests.`,
+            from: process.env.TWILIO_PHONE,
+            to: existingBooking.phone,
+          });
+
+          res.send({ success: true });
+
+        } catch (notifyError) {
+          console.error('Notification error:', notifyError);
+          res.send({ success: true, note: 'Booking updated but notifications failed.' });
+        }
+
+      } catch (err) {
+        console.error('Update error:', err);
+        res.status(500).json({ error: 'Server error' });
       }
     });
+
 
     // MyBooking related api
 
@@ -408,37 +635,95 @@ async function run() {
       res.send(bookings);
     });
 
-    app.delete('/my-bookings/:id', verifyToken, async (req, res) => {
+    // app.delete('/my-bookings/:id', verifyToken, async (req, res) => {
+    //   const id = req.params.id;
+    //   const email = req.decoded.email; // ✅ use decoded from token
+
+    //   const result = await bookingCollections.deleteOne({
+    //     _id: new ObjectId(id),
+    //     email: email, // only owner can delete
+    //   });
+
+    //   if (result.deletedCount) {
+    //     return res.send({ success: true });
+    //   } else {
+    //     return res.status(404).json({ error: 'Booking not found' });
+    //   }
+    // });
+
+    app.delete("/my-bookings/:id", verifyToken, async (req, res) => {
       const id = req.params.id;
-      const email = req.decoded.email; // ✅ use decoded from token
+      const query = { _id: new ObjectId(id), email: req.decoded.email };
 
-      const result = await bookingCollections.deleteOne({
-        _id: new ObjectId(id),
-        email: email, // only owner can delete
-      });
+      const booking = await bookingCollections.findOne(query);
+      if (!booking) return res.status(404).send("Booking not found");
 
-      if (result.deletedCount) {
-        return res.send({ success: true });
+      const result = await bookingCollections.deleteOne(query);
+
+      if (result.deletedCount > 0) {
+        try {
+          // ✅ Email
+          await transporter.sendMail({
+            from: process.env.EMAIL_USER,
+            to: booking.email,
+            subject: "Booking Canceled",
+            text: `Hi ${booking.name},\n\nYour booking on ${booking.date} at ${booking.time} has been successfully canceled.`,
+          });
+
+          // ✅ SMS
+          await twilioClient.messages.create({
+            body: `Hi ${booking.name}, your booking on ${booking.date} at ${booking.time} has been canceled.`,
+            from: process.env.TWILIO_PHONE,
+            to: booking.phone,
+          });
+
+          res.send({ success: true });
+        } catch (err) {
+          console.error("Notification error:", err);
+          res.send({ success: true, note: "Booking deleted but notification failed." });
+        }
       } else {
-        return res.status(404).json({ error: 'Booking not found' });
+        res.status(500).send("Failed to delete booking");
       }
     });
 
-    app.put('/my-bookings/:id', verifyToken, async (req, res) => {
-      const { id } = req.params;
-      const update = req.body; // { guests, date, time, etc. }
+    // Update booking and send notifications
+    app.put('/my-bookings/:id', async (req, res) => {
+      const id = req.params.id;
+      const updatedData = req.body;
 
-      const result = await bookingCollections.updateOne(
-        { _id: new ObjectId(id), email: req.decoded.email }, // ✅ use decoded.email
-        { $set: update }
-      );
+      try {
+        const result = await bookingCollections.findOneAndUpdate(
+          { _id: new ObjectId(id) },
+          { $set: updatedData },
+          { returnDocument: 'after' }
+        );
 
-      if (result.matchedCount) {
-        res.send({ success: true });
-      } else {
-        res.status(404).json({ error: 'Booking not found' });
+        if (!result.value) {
+          return res.status(404).json({ error: 'Booking not found' });
+        }
+
+        const booking = result.value;
+
+        // Send notifications
+        await sendEmail(
+          booking.email,
+          'Booking Updated',
+          `Your booking on ${booking.date} has been updated successfully.`
+        );
+        await sendSMS(
+          booking.phone,
+          `Your booking on ${booking.date} has been updated successfully.`
+        );
+
+        res.json(booking);
+      } catch (err) {
+        console.error('Error updating booking:', err);
+        res.status(500).json({ error: 'Failed to update booking' });
       }
     });
+
+
 
 
     // Message related api
@@ -459,49 +744,73 @@ async function run() {
     });
 
     // / 2️⃣ Fetch all messages (admin dashboard)
-    app.get("/api/messages", async (req, res) => {
-      const messages = await messagesCollection.find().sort({ createdAt: -1 }).toArray();
+    // app.get("/api/messages", async (req, res) => {
+    //   const messages = await messagesCollection.find().sort({ createdAt: -1 }).toArray();
+    //   res.json(messages);
+    // });
+
+    app.get("/api/messages", verifyToken, verifyAdmin, async (req, res) => {
+      const messages = await messagesCollection
+        .find({ deleted: { $ne: true } })
+        .sort({ createdAt: -1 })
+        .toArray();
       res.json(messages);
     });
 
 
     app.post("/api/messages/reply", async (req, res) => {
-  const { messageId, reply } = req.body;
+      const { messageId, reply } = req.body;
 
-  if (!messageId || !reply) return res.status(400).json({ error: "Message ID and reply are required" });
+      if (!messageId || !reply) return res.status(400).json({ error: "Message ID and reply are required" });
 
-  // 1. Save reply in MongoDB
-  const result = await messagesCollection.updateOne(
-    { _id: new ObjectId(messageId) },
-    { $set: { reply, repliedAt: new Date() } }
-  );
+      // 1. Save reply in MongoDB
+      const result = await messagesCollection.updateOne(
+        { _id: new ObjectId(messageId) },
+        { $set: { reply, repliedAt: new Date() } }
+      );
 
-  // 2. Optional: Send email using nodemailer
-  const originalMessage = await messagesCollection.findOne({ _id: new ObjectId(messageId) });
-  if (!originalMessage) return res.status(404).json({ error: "Message not found" });
+      // 2. Optional: Send email using nodemailer
+      const originalMessage = await messagesCollection.findOne({ _id: new ObjectId(messageId) });
+      if (!originalMessage) return res.status(404).json({ error: "Message not found" });
 
-  try {
-    const transporter = nodemailer.createTransport({
-      service: "Gmail",
-      auth: {
-        user: process.env.EMAIL_USER, // your email
-        pass: process.env.EMAIL_PASS, // your email app password
-      },
+      try {
+        const transporter = nodemailer.createTransport({
+          service: "Gmail",
+          auth: {
+            user: process.env.EMAIL_USER, // your email
+            pass: process.env.EMAIL_PASS, // your email app password
+          },
+        });
+
+        await transporter.sendMail({
+          from: process.env.EMAIL_USER,
+          to: originalMessage.email,
+          subject: "Reply from Bistro Boss",
+          text: reply,
+        });
+
+        res.json({ success: true }, result);
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Failed to send email" });
+      }
     });
 
-    await transporter.sendMail({
-      from: process.env.EMAIL_USER,
-      to: originalMessage.email,
-      subject: "Reply from Bistro Boss",
-      text: reply,
-    });
+    // DELETE /api/messages/:id
+    app.delete("/api/messages/:id", verifyToken, verifyAdmin, async (req, res) => {
+      const id = req.params.id;
 
-    res.json({ success: true });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Failed to send email" });
-  }
-});
+      const result = await messagesCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { deleted: true, deletedAt: new Date() } }
+      );
+
+      if (result.matchedCount) {
+        res.json({ success: true }, result);
+      } else {
+        res.status(404).json({ error: "Message not found" });
+      }
+    });
 
 
 
