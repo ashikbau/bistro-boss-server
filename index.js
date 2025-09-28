@@ -287,6 +287,25 @@ async function run() {
       res.send(result);
     })
 
+
+    app.patch('/menu/feature/:id', verifyToken, verifyAdmin, async (req, res) => {
+      // Admin-only route to update featured status
+      const id = req.params.id;
+      const { featured } = req.body;
+      try {
+        const result = await menuCollection.updateOne(
+          { _id: id },
+          { $set: { featured: featured } }
+        );
+        res.send(result);
+      } catch (err) {
+        console.error('Error updating featured status:', err);
+        res.status(500).send({ error: 'Something went wrong' });
+      }
+    });
+
+
+
     // review related API start
 
 
@@ -309,7 +328,7 @@ async function run() {
         name,
         rating,
         details,
-        userEmail, // ✅ email from token, not body
+        userEmail, // email from token, not body
         createdAt: new Date(),
       };
 
@@ -410,14 +429,14 @@ async function run() {
       };
       const deleteResult = await cartCollection.deleteMany(query);
 
-      // ✅ Send notifications
+      //  Send notifications
       try {
         const name = payment.name || "Customer";
         const email = payment.email;
         const phone = payment.phone;
         const amount = payment.price;
 
-        // ✅ Email Notification
+        //  Email Notification
         await transporter.sendMail({
           from: process.env.EMAIL_USER,
           to: email,
@@ -425,7 +444,7 @@ async function run() {
           text: `Hi ${name},\n\nThank you for your payment of $${amount}.\n\nWe’ve received it successfully. Your order is now being processed.\n\nBest regards,\nBistro Boss Team`
         });
 
-        // ✅ SMS Notification
+        // SMS Notification
         await twilioClient.messages.create({
           body: `Hi ${name}, your payment of $${amount} was successful. Thanks for choosing Bistro Boss!`,
           from: process.env.TWILIO_PHONE,
