@@ -112,6 +112,39 @@ async function run() {
 
 
     // users related api
+    // AdminHome
+    app.get('/admin-stats', verifyToken, verifyAdmin, async (req, res) => {
+      const users = await userCollection.estimatedDocumentCount();
+      const menuItems = await menuCollection.estimatedDocumentCount();
+
+      res.send({
+        users,
+        menuItems,
+      });
+    });
+
+    // User Home Stats
+    app.get('/user-stats', verifyToken, async (req, res) => {
+      const userEmail = req.decoded?.email;
+
+      if (!userEmail) {
+        return res.status(400).send({ error: "User email not found." });
+      }
+
+      try {
+        const bookings = await bookingCollections.countDocuments({ email: userEmail });
+        const reviews = await reviewCollection.countDocuments({ email: userEmail });
+
+        res.send({
+          bookings,
+          reviews
+        });
+      } catch (error) {
+        console.error("Failed to get user stats:", error);
+        res.status(500).send({ error: "Something went wrong." });
+      }
+    });
+
     app.get("/users", verifyToken, verifyAdmin, async (req, res) => {
 
       const result = await userCollection.find().toArray();
@@ -334,16 +367,7 @@ async function run() {
       res.send(result)
     })
 
-    // AdminHome
-    app.get('/admin-stats', verifyToken, verifyAdmin, async (req, res) => {
-      const users = await userCollection.estimatedDocumentCount();
-      const menuItems = await menuCollection.estimatedDocumentCount();
 
-      res.send({
-        users,
-        menuItems,
-      });
-    });
 
 
     // payment intent
@@ -743,11 +767,7 @@ async function run() {
       res.json({ insertedId: result.insertedId });
     });
 
-    // / 2️⃣ Fetch all messages (admin dashboard)
-    // app.get("/api/messages", async (req, res) => {
-    //   const messages = await messagesCollection.find().sort({ createdAt: -1 }).toArray();
-    //   res.json(messages);
-    // });
+
 
     app.get("/api/messages", verifyToken, verifyAdmin, async (req, res) => {
       const messages = await messagesCollection
@@ -774,14 +794,6 @@ async function run() {
       if (!originalMessage) return res.status(404).json({ error: "Message not found" });
 
       try {
-        const transporter = nodemailer.createTransport({
-          service: "Gmail",
-          auth: {
-            user: process.env.EMAIL_USER, // your email
-            pass: process.env.EMAIL_PASS, // your email app password
-          },
-        });
-
         await transporter.sendMail({
           from: process.env.EMAIL_USER,
           to: originalMessage.email,
