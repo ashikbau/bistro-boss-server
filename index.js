@@ -145,7 +145,7 @@ async function run() {
       }
     });
 
-    app.get("/users", verifyToken, verifyAdmin, async (req, res) => {
+    app.get("/users", verifyToken,  async (req, res) => {
 
       const result = await userCollection.find().toArray();
       res.send(result)
@@ -470,7 +470,7 @@ async function run() {
 
     // Bookings Related APi
     function generateSlots() {
-      return ['14:00', '15:00', '16:00', '17:00', '18:00', '19:00', '20:00', '21:00'];
+      return ['11:00',',12:00', '13:00', '14:00', '15:00', '16:00', '17:00', '18:00', '19:00', '20:00', '21:00','22:00'];
     }
 
     app.get('/managebooking', verifyToken, verifyAdmin, async (req, res) => {
@@ -484,7 +484,7 @@ async function run() {
       if (!date) return res.status(400).json({ error: 'Date required' });
 
       const maxPerSlot = 50; // max people per slot
-      const times = ['12:00', '13:00', '14:00', '15:00', '16:00', '17:00', '18:00', '19:00', '20:00', '21:00'];
+      const times = generateSlots();
 
       // Count existing bookings per slot
       const bookings = await bookingCollections
