@@ -125,27 +125,30 @@ async function run() {
 
     // User Home Stats
     app.get('/user-stats', verifyToken, async (req, res) => {
-      const userEmail = req.decoded?.email;
+  const userEmail = req.decoded?.email;
 
-      if (!userEmail) {
-        return res.status(400).send({ error: "User email not found." });
-      }
+  if (!userEmail) {
+    return res.status(400).send({ error: "User email not found." });
+  }
 
-      try {
-        const bookings = await bookingCollections.countDocuments({ email: userEmail });
-        const reviews = await reviewCollection.countDocuments({ email: userEmail });
+  try {
+    const bookings = await bookingCollections.countDocuments({ email: userEmail });
 
-        res.send({
-          bookings,
-          reviews
-        });
-      } catch (error) {
-        console.error("Failed to get user stats:", error);
-        res.status(500).send({ error: "Something went wrong." });
-      }
+    // ✅ Fixed field name here
+    const reviews = await reviewCollection.countDocuments({ userEmail: userEmail });
+
+    res.send({
+      bookings,
+      reviews
     });
+  } catch (error) {
+    console.error("Failed to get user stats:", error);
+    res.status(500).send({ error: "Something went wrong." });
+  }
+});
 
-    app.get("/users", verifyToken,  async (req, res) => {
+
+    app.get("/users", verifyToken, async (req, res) => {
 
       const result = await userCollection.find().toArray();
       res.send(result)
@@ -161,7 +164,7 @@ async function run() {
       res.send(result)
     })
 
-   
+
 
     app.patch("/users/admin/:id", verifyToken, verifyAdmin, async (req, res) => {
       const id = req.params.id;
@@ -199,6 +202,16 @@ async function run() {
         admin = user?.role === "admin"
       }
       res.send({ admin })
+    });
+    // GET /users/:email
+    app.get('/users/:email', async (req, res) => {
+      const email = req.params.email;
+      const user = await userCollection.findOne({ email });
+      if (user) {
+        res.send({ role: user.role }); // Will be undefined for regular users
+      } else {
+        res.status(404).send({ message: 'User not found' });
+      }
     });
 
 
@@ -470,7 +483,7 @@ async function run() {
 
     // Bookings Related APi
     function generateSlots() {
-      return ['11:00',',12:00', '13:00', '14:00', '15:00', '16:00', '17:00', '18:00', '19:00', '20:00', '21:00','22:00'];
+      return ['11:00', ',12:00', '13:00', '14:00', '15:00', '16:00', '17:00', '18:00', '19:00', '20:00', '21:00', '22:00'];
     }
 
     app.get('/managebooking', verifyToken, verifyAdmin, async (req, res) => {
