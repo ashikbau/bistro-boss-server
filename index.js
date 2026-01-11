@@ -14,14 +14,25 @@ const formatPhone = require("./utils/formatPhone");
 const app = express();
 const port = process.env.PORT || 5000;
 
-app.use(cors());
+const allowedOrigins = [
+  "http://localhost:5173", // frontend during local dev
+  "bistro-boss-client-duff-btfpcd3cz-ashikbaus-projects.vercel.app", // replace with deployed frontend URL
+];
+
+app.use(cors({
+  origin: allowedOrigins,
+  credentials: true,
+}));
+
+
+
 app.use(express.json());
 app.use(
   helmet({
     contentSecurityPolicy: {
       directives: {
         defaultSrc: ["'self'"],
-        connectSrc: ["'self'", "http://localhost:5000"],
+        connectSrc: ["'self'", ...allowedOrigins],
         scriptSrc: ["'self'", "'unsafe-inline'"],
         styleSrc: ["'self'", "'unsafe-inline'"],
         imgSrc: ["'self'", "data:"],
@@ -29,6 +40,7 @@ app.use(
     },
   })
 );
+
 
 // Nodemailer setup
 const transporter = nodemailer.createTransport({
