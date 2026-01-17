@@ -16,7 +16,7 @@ const port = process.env.PORT || 5000;
 
 const allowedOrigins = [
   "http://localhost:5173", // frontend during local dev
-  "bistro-boss-client-duff-btfpcd3cz-ashikbaus-projects.vercel.app", // replace with deployed frontend URL
+
 ];
 
 app.use(cors({
