@@ -10,6 +10,7 @@ require('dotenv').config();
 const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
 const formatPhone = require("./utils/formatPhone");
+const session = require('express-session');
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -19,10 +20,35 @@ const allowedOrigins = [
 
 ];
 
+
+
+// const allowedOrigins = [
+//   "http://localhost:5173",
+
+// ];
+
+app.set('trust proxy', 1);
+
+app.use(session({
+  name: 'sid',
+  secret: process.env.SESSION_SECRET,
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    httpOnly: true,
+    secure: true,     // MUST be true on HTTPS
+    sameSite: 'none', // REQUIRED for mobile OAuth
+    maxAge: 1000 * 60 * 60 * 24,
+  },
+}));
+
+
 app.use(cors({
   origin: allowedOrigins,
   credentials: true,
 }));
+
+
 
 
 
